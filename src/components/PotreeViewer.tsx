@@ -13,7 +13,7 @@ interface PotreeViewerProps {
 }
 
 const PotreeViewer: React.FC<PotreeViewerProps> = ({
-  geojsonUrl = "okinawa.geojson",
+  geojsonUrl = "cont.geojson",
   width = 1000,
   height = 1000,
   className,
@@ -203,8 +203,8 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                         const lat = coord[1];
 
                         // GeoJSONの実際の中心を基準点として使用
-                        const x = (lon - geojsonCenterLon) * 1000;
-                        const y = (lat - geojsonCenterLat) * 1000;
+                        const x = (lon - geojsonCenterLon) * 100000;
+                        const y = (lat - geojsonCenterLat) * 100000;
                         points.push(new THREE.Vector3(x, y, 0));
 
                         // 新しい座標系での境界を更新
@@ -288,8 +288,8 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     const actualTileLonRange = tileLonMax - tileLonMin;
 
                     // タイルの実際の緯度経度範囲をGeoJSONと同じスケールで変換
-                    const mapWidth = actualTileLonRange * 1000;
-                    const mapHeight = actualTileLatRange * 1000;
+                    const mapWidth = actualTileLonRange * 100000;
+                    const mapHeight = actualTileLatRange * 100000;
 
                     const mapGeometry = new THREE.PlaneGeometry(
                       mapWidth,
@@ -323,10 +323,10 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     const geojsonCenterLon = (minLon + maxLon) / 2;
                     const geojsonCenterLat = (minLat + maxLat) / 2;
 
-                    // 3x3のタイルグリッドを作成
+                    // 5x5のタイルグリッドを作成
                     const textureLoader = new THREE.TextureLoader();
-                    for (let dy = -1; dy <= 1; dy++) {
-                      for (let dx = -1; dx <= 1; dx++) {
+                    for (let dy = -2; dy <= 2; dy++) {
+                      for (let dx = -2; dx <= 2; dx++) {
                         const currentTileX = tileX + dx;
                         const currentTileY = tileY + dy;
 
@@ -357,20 +357,16 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                           (currentTileLatMin + currentTileLatMax) / 2;
 
                         const currentMapCenterX =
-                          (currentTileCenterLon - geojsonCenterLon) * 1000;
+                          (currentTileCenterLon - geojsonCenterLon) * 100000;
                         const currentMapCenterY =
-                          (currentTileCenterLat - geojsonCenterLat) * 1000;
+                          (currentTileCenterLat - geojsonCenterLat) * 100000;
 
                         // タイルをロード
                         const tileUrl = `https://cyberjapandata.gsi.go.jp/xyz/std/${clampedZoom}/${currentTileX}/${currentTileY}.png`;
-                        console.log(`Loading tile [${dx},${dy}]:`, tileUrl);
 
                         const mapTexture = textureLoader.load(
                           tileUrl,
-                          () =>
-                            console.log(
-                              `Tile [${dx},${dy}] loaded successfully`
-                            ),
+                          () => {},
                           undefined,
                           (error) => {
                             console.warn(
@@ -445,7 +441,7 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
         viewerRef.current.dispose();
       }
     };
-  }, [geojsonUrl]);
+  }, [geojsonUrl, width, height]);
 
   return (
     <div
