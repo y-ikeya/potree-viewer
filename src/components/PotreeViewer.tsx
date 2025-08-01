@@ -82,8 +82,6 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
 
           try {
             viewer = new Potree.Viewer(containerRef.current!);
-            console.log("Potree viewer created successfully");
-
             viewer.setEDLEnabled(true);
             viewer.setFOV(60);
             viewer.setPointBudget(1_000_000);
@@ -95,8 +93,6 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
             );
             isThreeJsFallback = true;
 
-            // Create basic THREE.js scene
-            console.log("Creating THREE.js fallback scene...");
             const scene = new THREE.Scene();
             const camera = new THREE.PerspectiveCamera(
               75,
@@ -114,10 +110,9 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
             if (containerRef.current) {
               containerRef.current.innerHTML = "";
               containerRef.current.appendChild(renderer.domElement);
-              console.log("Canvas added to container");
             }
 
-            camera.position.set(0, 0, 100);
+            camera.position.set(0, 0, 10);
 
             // Add OrbitControls for zoom and pan
             const controls = new OrbitControls(camera, renderer.domElement);
@@ -145,11 +140,275 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
 
           viewerRef.current = viewer;
 
-          if (!isThreeJsFallback && viewer) {
-            try {
-              viewer.fitToScreen();
-            } catch (error) {
-              console.warn("Failed to load point cloud:", error);
+          // Load point cloud data
+          if (viewer) {
+            if (!isThreeJsFallback) {
+              try {
+                viewer.fitToScreen();
+              } catch (error) {
+                console.warn("Failed to load point cloud:", error);
+              }
+            } else {
+              // THREE.js fallback: Load point cloud manually
+              console.log("Loading point cloud data for THREE.js fallback");
+
+              // Load metadata
+              fetch("/bins/metadata.json")
+                .then((response) => response.json())
+                .then(async (metadata) => {
+                  console.log("Point cloud metadata:", metadata);
+
+                  // Create point cloud from binary data
+                  const pointsCount = metadata.points || 0;
+                  const boundingBox = metadata.boundingBox;
+                  const offset = metadata.offset;
+                  const scale = metadata.scale;
+
+                  // Load octree binary file
+                  const octreeResponse = await fetch("/bins/octree.bin");
+                  const octreeBuffer = await octreeResponse.arrayBuffer();
+                  console.log(
+                    "Octree buffer loaded:",
+                    octreeBuffer.byteLength,
+                    "bytes"
+                  );
+
+                  // Parse octree data based on Potree format
+                  const dataView = new DataView(octreeBuffer);
+                  let byteOffset = 0;
+
+                  // Create point cloud geometry
+                  const geometry = new THREE.BufferGeometry();
+
+                  if (boundingBox && metadata.attributes) {
+                    const center = [
+                      (boundingBox.min[0] + boundingBox.max[0]) / 2,
+                      (boundingBox.min[1] + boundingBox.max[1]) / 2,
+                      (boundingBox.min[2] + boundingBox.max[2]) / 2,
+                    ];
+
+                    // Parse attributes to understand data layout
+                    let positionAttribute = null;
+                    let totalAttributeSize = 0;
+
+                    for (const attr of metadata.attributes) {
+                      if (attr.name === "position") {
+                        positionAttribute = attr;
+                      }
+                      totalAttributeSize += attr.size;
+                    }
+
+                    console.log("Position attribute:", positionAttribute);
+                    console.log(
+                      "Total attribute size per point:",
+                      totalAttributeSize
+                    );
+
+                    // Calculate actual number of points we can read
+                    const actualPointsCount = Math.min(
+                      pointsCount,
+                      Math.floor(octreeBuffer.byteLength / totalAttributeSize)
+                    );
+                    console.log(
+                      `Reading ${actualPointsCount} points out of ${pointsCount}`
+                    );
+
+                    // Define projection for plane rectangular coordinate system 15 (Okinawa)
+                    // EPSG:2456 - JGD2000 / Japan Plane Rectangular CS XV
+                    const jprcs15 =
+                      "+proj=tmerc +lat_0=26 +lon_0=124 +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+                    const wgs84 = "+proj=longlat +datum=WGS84 +no_defs";
+
+                    // Create arrays for positions and colors
+                    const positions = new Float32Array(actualPointsCount * 3);
+                    const colors = new Float32Array(actualPointsCount * 3);
+
+                    // First pass: Convert all points and find geographic bounds
+                    const lonLatPoints: Array<[number, number, number]> = [];
+                    let minLon = Infinity,
+                      maxLon = -Infinity;
+                    let minLat = Infinity,
+                      maxLat = -Infinity;
+
+                    let tempByteOffset = byteOffset;
+                    for (
+                      let i = 0;
+                      i < actualPointsCount &&
+                      tempByteOffset + totalAttributeSize <=
+                        octreeBuffer.byteLength;
+                      i++
+                    ) {
+                      if (
+                        positionAttribute &&
+                        positionAttribute.type === "int32"
+                      ) {
+                        const x_plane =
+                          dataView.getInt32(tempByteOffset, true) *
+                            (scale?.[0] || 0.001) +
+                          (offset?.[0] || 0);
+                        const y_plane =
+                          dataView.getInt32(tempByteOffset + 4, true) *
+                            (scale?.[1] || 0.001) +
+                          (offset?.[1] || 0);
+                        const z =
+                          dataView.getInt32(tempByteOffset + 8, true) *
+                            (scale?.[2] || 0.001) +
+                          (offset?.[2] || 0);
+
+                        // Convert from plane rectangular coordinate system 15 to lat/lon
+                        const [lon, lat] = proj4(jprcs15, wgs84, [
+                          x_plane,
+                          y_plane,
+                        ]);
+
+                        lonLatPoints.push([lon, lat, z]);
+
+                        // Update geographic bounds
+                        minLon = Math.min(minLon, lon);
+                        maxLon = Math.max(maxLon, lon);
+                        minLat = Math.min(minLat, lat);
+                        maxLat = Math.max(maxLat, lat);
+                      }
+
+                      tempByteOffset += totalAttributeSize;
+                    }
+
+                    // Calculate center from actual bounds
+                    const pointCloudCenterLon = (minLon + maxLon) / 2;
+                    const pointCloudCenterLat = (minLat + maxLat) / 2;
+
+                    console.log("Point cloud geographic bounds:", {
+                      minLon,
+                      maxLon,
+                      minLat,
+                      maxLat,
+                      centerLon: pointCloudCenterLon,
+                      centerLat: pointCloudCenterLat,
+                    });
+
+                    // Second pass: Create positions relative to center
+                    for (let i = 0; i < lonLatPoints.length; i++) {
+                      const i3 = i * 3;
+                      const [lon, lat, z] = lonLatPoints[i];
+
+                      // Convert to the same coordinate system as the map
+                      positions[i3] = (lon - pointCloudCenterLon) * 100000;
+                      positions[i3 + 1] = (lat - pointCloudCenterLat) * 100000;
+                      positions[i3 + 2] = z;
+
+                      // Set colors based on height with better gradient
+                      const normalizedHeight =
+                        (z - boundingBox.min[2]) /
+                        (boundingBox.max[2] - boundingBox.min[2]);
+
+                      // Create a smooth gradient from blue (low) -> green -> yellow -> red (high)
+                      let r, g, b;
+                      if (normalizedHeight < 0.25) {
+                        // Blue to cyan
+                        const t = normalizedHeight / 0.25;
+                        r = 0;
+                        g = t;
+                        b = 1;
+                      } else if (normalizedHeight < 0.5) {
+                        // Cyan to green
+                        const t = (normalizedHeight - 0.25) / 0.25;
+                        r = 0;
+                        g = 1;
+                        b = 1 - t;
+                      } else if (normalizedHeight < 0.75) {
+                        // Green to yellow
+                        const t = (normalizedHeight - 0.5) / 0.25;
+                        r = t;
+                        g = 1;
+                        b = 0;
+                      } else {
+                        // Yellow to red
+                        const t = (normalizedHeight - 0.75) / 0.25;
+                        r = 1;
+                        g = 1 - t;
+                        b = 0;
+                      }
+
+                      colors[i3] = r;
+                      colors[i3 + 1] = g;
+                      colors[i3 + 2] = b;
+                    }
+
+                    geometry.setAttribute(
+                      "position",
+                      new THREE.BufferAttribute(positions, 3)
+                    );
+                    geometry.setAttribute(
+                      "color",
+                      new THREE.BufferAttribute(colors, 3)
+                    );
+
+                    // Create point cloud material
+                    const material = new THREE.PointsMaterial({
+                      size: 0.5,
+                      vertexColors: true,
+                      sizeAttenuation: true,
+                      transparent: true,
+                      opacity: 0.8,
+                    });
+
+                    // Create points object
+                    const points = new THREE.Points(geometry, material);
+                    viewer.scene.add(points);
+
+                    // Also add a bounding box wireframe
+                    const boxGeometry = new THREE.BoxGeometry(
+                      boundingBox.max[0] - boundingBox.min[0],
+                      boundingBox.max[1] - boundingBox.min[1],
+                      boundingBox.max[2] - boundingBox.min[2]
+                    );
+                    const boxMaterial = new THREE.MeshBasicMaterial({
+                      color: 0x00ff00,
+                      wireframe: true,
+                    });
+                    const box = new THREE.Mesh(boxGeometry, boxMaterial);
+                    box.position.set(center[0], center[1], center[2]);
+                    viewer.scene.add(box);
+
+                    // Update viewer's center reference for GeoJSON processing
+                    viewer.pointCloudCenter = {
+                      lon: pointCloudCenterLon,
+                      lat: pointCloudCenterLat,
+                    };
+
+                    // Adjust camera to view the point cloud (at origin since it's centered)
+                    const geoDistance =
+                      Math.max(maxLon - minLon, maxLat - minLat) * 100000;
+
+                    const heightRange = boundingBox.max[2] - boundingBox.min[2];
+                    const optimalDistance = Math.max(
+                      geoDistance / 5,
+                      heightRange / 5,
+                      20
+                    );
+
+                    viewer.camera.position.set(
+                      optimalDistance,
+                      optimalDistance,
+                      optimalDistance
+                    );
+                    viewer.camera.lookAt(0, 0, 0);
+
+                    console.log(
+                      `Point cloud created with ${actualPointsCount} points`
+                    );
+                    console.log(
+                      "Point cloud will be centered at origin with geographic center:",
+                      {
+                        lon: pointCloudCenterLon,
+                        lat: pointCloudCenterLat,
+                      }
+                    );
+                  }
+                })
+                .catch((error) => {
+                  console.error("Failed to load point cloud metadata:", error);
+                });
             }
           }
 
@@ -182,9 +441,17 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     }
                   });
 
-                  // GeoJSONの中心を計算
-                  const geojsonCenterLon = (minLon + maxLon) / 2;
-                  const geojsonCenterLat = (minLat + maxLat) / 2;
+                  // Use GeoJSON's own center for coordinate conversion
+                  const geojsonCenterLon: number = (minLon + maxLon) / 2;
+                  const geojsonCenterLat: number = (minLat + maxLat) / 2;
+                  // Force GeoJSON to display at the same location as point cloud (at origin)
+                  let offsetX = 0,
+                    offsetY = 0;
+                  if (viewer.pointCloudCenter) {
+                    // Don't offset - display GeoJSON at the same location as point cloud
+                    offsetX = 0;
+                    offsetY = 0;
+                  }
 
                   // XY座標の境界を初期化
                   let minX = Infinity,
@@ -199,13 +466,37 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                       const points: THREE.Vector3[] = [];
 
                       coordinates.forEach((coord: number[]) => {
-                        const lon = coord[0];
-                        const lat = coord[1];
+                        let x: number, y: number;
 
-                        // GeoJSONの実際の中心を基準点として使用
-                        const x = (lon - geojsonCenterLon) * 100000;
-                        const y = (lat - geojsonCenterLat) * 100000;
-                        points.push(new THREE.Vector3(x, y, 0));
+                        // Check if coordinates are in plane rectangular coordinate system (large values > 1000)
+                        // or geographic coordinates (small values like degrees)
+                        if (
+                          Math.abs(coord[0]) > 1000 ||
+                          Math.abs(coord[1]) > 1000
+                        ) {
+                          // Assume plane rectangular coordinate system - convert to lat/lon first
+                          const jprcs15 =
+                            "+proj=tmerc +lat_0=26 +lon_0=124 +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+                          const wgs84 = "+proj=longlat +datum=WGS84 +no_defs";
+                          const [lon, lat] = proj4(jprcs15, wgs84, [
+                            coord[0],
+                            coord[1],
+                          ]);
+
+                          // Then convert to scene coordinates and apply offset
+                          x = (lon - geojsonCenterLon) * 100000 + offsetX;
+                          y = (lat - geojsonCenterLat) * 100000 + offsetY;
+                        } else {
+                          // Geographic coordinates - use directly
+                          const lon = coord[0];
+                          const lat = coord[1];
+
+                          // Convert relative to GeoJSON center, then apply offset to align with point cloud
+                          x = (lon - geojsonCenterLon) * 100000 + offsetX;
+                          y = (lat - geojsonCenterLat) * 100000 + offsetY;
+                        }
+
+                        points.push(new THREE.Vector3(x, y, 1));
 
                         // 新しい座標系での境界を更新
                         minX = Math.min(minX, x);
@@ -219,7 +510,9 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                       );
                       const material = new THREE.LineBasicMaterial({
                         color: 0xff0000,
-                        linewidth: 2,
+                        linewidth: 5,
+                        transparent: false,
+                        opacity: 1.0,
                       });
                       const line = new THREE.Line(geometry, material);
 
@@ -228,6 +521,7 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                         viewer.scene.add(line);
                       } else if (viewer && viewer.scene && viewer.scene.scene) {
                         viewer.scene.scene.add(line);
+                        console.log("GeoJSON line added to Potree scene");
                       }
                     }
                   });
@@ -240,28 +534,46 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     const height = maxY - minY;
                     const maxDimension = Math.max(width, height);
 
-                    // GeoJSONの緯度経度範囲を使用して適切なズームレベルを計算
-                    const latRange = maxLat - minLat;
-                    const lonRange = maxLon - minLon;
+                    // Don't override camera position if point cloud was already loaded
+                    let shouldUpdateCamera = !viewer.pointCloudCenter;
+
+                    // Use actual point cloud geographic bounds for accurate map tiles
+                    const actualCenterLat = (minLat + maxLat) / 2;
+                    const actualCenterLon = (minLon + maxLon) / 2;
+                    const actualLatRange = maxLat - minLat;
+                    const actualLonRange = maxLon - minLon;
+
+                    console.log(
+                      "Using actual point cloud geographic bounds for map:",
+                      {
+                        actualCenterLat,
+                        actualCenterLon,
+                        actualLatRange,
+                        actualLonRange,
+                        minLat,
+                        maxLat,
+                        minLon,
+                        maxLon,
+                      }
+                    );
+
                     const zoom =
                       Math.floor(
-                        Math.log2(360 / Math.max(latRange, lonRange))
-                      ) + 2; // +2でより詳細に
-                    const clampedZoom = Math.max(10, Math.min(18, zoom)); // 最低でもズーム10、最大18
+                        Math.log2(
+                          360 / Math.max(actualLatRange, actualLonRange)
+                        )
+                      ) + 2;
+                    const clampedZoom = Math.max(10, Math.min(18, zoom));
 
-                    // 中心の緯度経度
-                    const centerLat = (minLat + maxLat) / 2;
-                    const centerLon = (minLon + maxLon) / 2;
-
-                    // タイル座標を計算
+                    // タイル座標を実際の点群座標から計算
                     const tileX = Math.floor(
-                      ((centerLon + 180) / 360) * Math.pow(2, clampedZoom)
+                      ((actualCenterLon + 180) / 360) * Math.pow(2, clampedZoom)
                     );
                     const tileY = Math.floor(
                       ((1 -
                         Math.log(
-                          Math.tan((centerLat * Math.PI) / 180) +
-                            1 / Math.cos((centerLat * Math.PI) / 180)
+                          Math.tan((actualCenterLat * Math.PI) / 180) +
+                            1 / Math.cos((actualCenterLat * Math.PI) / 180)
                         ) /
                           Math.PI) /
                         2) *
@@ -295,33 +607,10 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                       mapWidth,
                       mapHeight
                     );
-                    console.log("Map geometry size:", mapWidth, "x", mapHeight);
-                    console.log("Tile lat/lon ranges:", {
-                      latRange: actualTileLatRange,
-                      lonRange: actualTileLonRange,
-                    });
 
-                    console.log("Map bounds:", {
-                      minLat,
-                      maxLat,
-                      minLon,
-                      maxLon,
-                    });
-                    console.log("Calculated tile:", {
-                      zoom: clampedZoom,
-                      x: tileX,
-                      y: tileY,
-                    });
-                    console.log("Tile actual bounds:", {
-                      latMin: tileLatMin,
-                      latMax: tileLatMax,
-                      lonMin: tileLonMin,
-                      lonMax: tileLonMax,
-                    });
-
-                    // GeoJSONの実際の中心を基準点として使用
-                    const geojsonCenterLon = (minLon + maxLon) / 2;
-                    const geojsonCenterLat = (minLat + maxLat) / 2;
+                    // Use actual point cloud center for map tiles
+                    const mapCenterLon = actualCenterLon;
+                    const mapCenterLat = actualCenterLat;
 
                     // 5x5のタイルグリッドを作成
                     const textureLoader = new THREE.TextureLoader();
@@ -357,9 +646,9 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                           (currentTileLatMin + currentTileLatMax) / 2;
 
                         const currentMapCenterX =
-                          (currentTileCenterLon - geojsonCenterLon) * 100000;
+                          (currentTileCenterLon - mapCenterLon) * 100000;
                         const currentMapCenterY =
-                          (currentTileCenterLat - geojsonCenterLat) * 100000;
+                          (currentTileCenterLat - mapCenterLat) * 100000;
 
                         // タイルをロード
                         const tileUrl = `https://cyberjapandata.gsi.go.jp/xyz/std/${clampedZoom}/${currentTileX}/${currentTileY}.png`;
@@ -394,27 +683,24 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                       }
                     }
 
-                    console.log("3x3 tile grid created around center:", {
-                      geojsonCenterLon,
-                      geojsonCenterLat,
-                      centerTileX: tileX,
-                      centerTileY: tileY,
-                      zoom: clampedZoom,
-                    });
-                    console.log(
-                      "Background map grid added with calculated coordinates"
-                    );
-
                     // カメラを中心に向けて適切な距離に配置（近づけて10倍大きく表示）
-                    viewer.camera.position.set(
-                      centerX,
-                      centerY,
-                      maxDimension * 0.5
-                    );
-                    viewer.camera.lookAt(centerX, centerY, 0);
+                    if (shouldUpdateCamera) {
+                      viewer.camera.position.set(
+                        centerX,
+                        centerY,
+                        maxDimension * 0.1
+                      );
+                      viewer.camera.lookAt(centerX, centerY, 0);
+                    } else {
+                      // If point cloud center exists, position camera to see both point cloud and map
+                      const combinedDistance = Math.max(
+                        maxDimension * 0.1,
+                        1000
+                      );
+                      viewer.camera.position.set(0, 0, combinedDistance);
+                      viewer.camera.lookAt(0, 0, 0);
+                    }
                   }
-
-                  console.log("GeoJSON loaded and rendered successfully");
                 } catch (error) {
                   console.error("Failed to parse GeoJSON:", error);
                 }
