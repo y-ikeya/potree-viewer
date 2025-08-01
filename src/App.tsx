@@ -1,14 +1,10 @@
-import './App.css';
-import PotreeViewer from './components/PotreeViewer';
+import "./App.css";
+import Map from "./components/map/Map";
 
 function App() {
   return (
-    <div className="App" style={{ margin: 0, padding: 0, width: '100vw', height: '100vh', overflow: 'hidden' }}>      
-      <PotreeViewer 
-        width={window.innerWidth}
-        height={window.innerHeight}
-        className="potree-container"
-      />
+    <div className="App">
+      <Map />
     </div>
   );
 }
