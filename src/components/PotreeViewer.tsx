@@ -13,7 +13,7 @@ interface PotreeViewerProps {
 }
 
 const PotreeViewer: React.FC<PotreeViewerProps> = ({
-  geojsonUrl = "cont.geojson",
+  geojsonUrl = "grid_con.geojson",
   width = 1000,
   height = 1000,
   className,
@@ -277,15 +277,6 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     const pointCloudCenterLon = (minLon + maxLon) / 2;
                     const pointCloudCenterLat = (minLat + maxLat) / 2;
 
-                    console.log("Point cloud geographic bounds:", {
-                      minLon,
-                      maxLon,
-                      minLat,
-                      maxLat,
-                      centerLon: pointCloudCenterLon,
-                      centerLat: pointCloudCenterLat,
-                    });
-
                     // Second pass: Create positions relative to center
                     for (let i = 0; i < lonLatPoints.length; i++) {
                       const i3 = i * 3;
@@ -509,7 +500,7 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                         points
                       );
                       const material = new THREE.LineBasicMaterial({
-                        color: 0xff0000,
+                        color: 0x00ff00, // 自動生成された等高線は緑
                         linewidth: 5,
                         transparent: false,
                         opacity: 1.0,
@@ -543,19 +534,286 @@ const PotreeViewer: React.FC<PotreeViewerProps> = ({
                     const actualLatRange = maxLat - minLat;
                     const actualLonRange = maxLon - minLon;
 
-                    console.log(
-                      "Using actual point cloud geographic bounds for map:",
-                      {
-                        actualCenterLat,
-                        actualCenterLon,
-                        actualLatRange,
-                        actualLonRange,
-                        minLat,
-                        maxLat,
-                        minLon,
-                        maxLon,
-                      }
+                    const zoom =
+                      Math.floor(
+                        Math.log2(
+                          360 / Math.max(actualLatRange, actualLonRange)
+                        )
+                      ) + 2;
+                    const clampedZoom = Math.max(10, Math.min(18, zoom));
+
+                    // タイル座標を実際の点群座標から計算
+                    const tileX = Math.floor(
+                      ((actualCenterLon + 180) / 360) * Math.pow(2, clampedZoom)
                     );
+                    const tileY = Math.floor(
+                      ((1 -
+                        Math.log(
+                          Math.tan((actualCenterLat * Math.PI) / 180) +
+                            1 / Math.cos((actualCenterLat * Math.PI) / 180)
+                        ) /
+                          Math.PI) /
+                        2) *
+                        Math.pow(2, clampedZoom)
+                    );
+
+                    // タイルの実際の緯度経度境界を計算
+                    const n = Math.pow(2, clampedZoom);
+                    const tileLonMin = (tileX / n) * 360 - 180;
+                    const tileLonMax = ((tileX + 1) / n) * 360 - 180;
+                    const tileLatMax =
+                      (Math.atan(Math.sinh(Math.PI * (1 - (2 * tileY) / n))) *
+                        180) /
+                      Math.PI;
+                    const tileLatMin =
+                      (Math.atan(
+                        Math.sinh(Math.PI * (1 - (2 * (tileY + 1)) / n))
+                      ) *
+                        180) /
+                      Math.PI;
+
+                    // 背景地図を追加（タイルの実際の緯度経度範囲に基づく）
+                    const actualTileLatRange = tileLatMax - tileLatMin;
+                    const actualTileLonRange = tileLonMax - tileLonMin;
+
+                    // タイルの実際の緯度経度範囲をGeoJSONと同じスケールで変換
+                    const mapWidth = actualTileLonRange * 100000;
+                    const mapHeight = actualTileLatRange * 100000;
+
+                    const mapGeometry = new THREE.PlaneGeometry(
+                      mapWidth,
+                      mapHeight
+                    );
+
+                    // Use actual point cloud center for map tiles
+                    const mapCenterLon = actualCenterLon;
+                    const mapCenterLat = actualCenterLat;
+
+                    // 5x5のタイルグリッドを作成
+                    const textureLoader = new THREE.TextureLoader();
+                    for (let dy = -2; dy <= 2; dy++) {
+                      for (let dx = -2; dx <= 2; dx++) {
+                        const currentTileX = tileX + dx;
+                        const currentTileY = tileY + dy;
+
+                        // 現在のタイルの境界を計算
+                        const currentTileLonMin =
+                          (currentTileX / n) * 360 - 180;
+                        const currentTileLonMax =
+                          ((currentTileX + 1) / n) * 360 - 180;
+                        const currentTileLatMax =
+                          (Math.atan(
+                            Math.sinh(Math.PI * (1 - (2 * currentTileY) / n))
+                          ) *
+                            180) /
+                          Math.PI;
+                        const currentTileLatMin =
+                          (Math.atan(
+                            Math.sinh(
+                              Math.PI * (1 - (2 * (currentTileY + 1)) / n)
+                            )
+                          ) *
+                            180) /
+                          Math.PI;
+
+                        // タイルの中心をGeoJSONの座標系に変換
+                        const currentTileCenterLon =
+                          (currentTileLonMin + currentTileLonMax) / 2;
+                        const currentTileCenterLat =
+                          (currentTileLatMin + currentTileLatMax) / 2;
+
+                        const currentMapCenterX =
+                          (currentTileCenterLon - mapCenterLon) * 100000;
+                        const currentMapCenterY =
+                          (currentTileCenterLat - mapCenterLat) * 100000;
+
+                        // タイルをロード
+                        const tileUrl = `https://cyberjapandata.gsi.go.jp/xyz/std/${clampedZoom}/${currentTileX}/${currentTileY}.png`;
+
+                        const mapTexture = textureLoader.load(
+                          tileUrl,
+                          () => {},
+                          undefined,
+                          (error) => {
+                            console.warn(
+                              `Failed to load tile [${dx},${dy}]:`,
+                              error
+                            );
+                          }
+                        );
+
+                        const mapMaterial = new THREE.MeshBasicMaterial({
+                          map: mapTexture,
+                          transparent: true,
+                          opacity: 1,
+                        });
+                        const mapPlane = new THREE.Mesh(
+                          mapGeometry,
+                          mapMaterial
+                        );
+                        mapPlane.position.set(
+                          currentMapCenterX,
+                          currentMapCenterY,
+                          -0.01
+                        );
+                        viewer.scene.add(mapPlane);
+                      }
+                    }
+
+                    // カメラを中心に向けて適切な距離に配置（近づけて10倍大きく表示）
+                    if (shouldUpdateCamera) {
+                      viewer.camera.position.set(
+                        centerX,
+                        centerY,
+                        maxDimension * 0.1
+                      );
+                      viewer.camera.lookAt(centerX, centerY, 0);
+                    } else {
+                      // If point cloud center exists, position camera to see both point cloud and map
+                      const combinedDistance = Math.max(
+                        maxDimension * 0.1,
+                        1000
+                      );
+                      viewer.camera.position.set(0, 0, combinedDistance);
+                      viewer.camera.lookAt(0, 0, 0);
+                    }
+                  }
+                } catch (error) {
+                  console.error("Failed to parse GeoJSON:", error);
+                }
+              },
+              undefined,
+              (error) => {
+                console.error("Failed to load GeoJSON:", error);
+              }
+            );
+            loader.load(
+              "cont.geojson",
+              (data) => {
+                try {
+                  const geojsonData = JSON.parse(data as string);
+
+                  // 最初に緯度経度の境界を計算
+                  let minLon = Infinity,
+                    maxLon = -Infinity;
+                  let minLat = Infinity,
+                    maxLat = -Infinity;
+
+                  // 全座標をスキャンして緯度経度の境界を取得
+                  geojsonData.features.forEach((feature: any) => {
+                    if (feature.geometry.type === "LineString") {
+                      feature.geometry.coordinates.forEach(
+                        (coord: number[]) => {
+                          minLon = Math.min(minLon, coord[0]);
+                          maxLon = Math.max(maxLon, coord[0]);
+                          minLat = Math.min(minLat, coord[1]);
+                          maxLat = Math.max(maxLat, coord[1]);
+                        }
+                      );
+                    }
+                  });
+
+                  // Use GeoJSON's own center for coordinate conversion
+                  const geojsonCenterLon: number = (minLon + maxLon) / 2;
+                  const geojsonCenterLat: number = (minLat + maxLat) / 2;
+                  // Force GeoJSON to display at the same location as point cloud (at origin)
+                  let offsetX = 0,
+                    offsetY = 0;
+                  if (viewer.pointCloudCenter) {
+                    // Don't offset - display GeoJSON at the same location as point cloud
+                    offsetX = 0;
+                    offsetY = 0;
+                  }
+
+                  // XY座標の境界を初期化
+                  let minX = Infinity,
+                    maxX = -Infinity;
+                  let minY = Infinity,
+                    maxY = -Infinity;
+
+                  // GeoJSONの各フィーチャーを線として描画
+                  geojsonData.features.forEach((feature: any) => {
+                    if (feature.geometry.type === "LineString") {
+                      const coordinates = feature.geometry.coordinates;
+                      const points: THREE.Vector3[] = [];
+
+                      coordinates.forEach((coord: number[]) => {
+                        let x: number, y: number;
+
+                        // Check if coordinates are in plane rectangular coordinate system (large values > 1000)
+                        // or geographic coordinates (small values like degrees)
+                        if (
+                          Math.abs(coord[0]) > 1000 ||
+                          Math.abs(coord[1]) > 1000
+                        ) {
+                          // Assume plane rectangular coordinate system - convert to lat/lon first
+                          const jprcs15 =
+                            "+proj=tmerc +lat_0=26 +lon_0=124 +k=0.9999 +x_0=0 +y_0=0 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs";
+                          const wgs84 = "+proj=longlat +datum=WGS84 +no_defs";
+                          const [lon, lat] = proj4(jprcs15, wgs84, [
+                            coord[0],
+                            coord[1],
+                          ]);
+
+                          // Then convert to scene coordinates and apply offset
+                          x = (lon - geojsonCenterLon) * 100000 + offsetX;
+                          y = (lat - geojsonCenterLat) * 100000 + offsetY;
+                        } else {
+                          // Geographic coordinates - use directly
+                          const lon = coord[0];
+                          const lat = coord[1];
+
+                          // Convert relative to GeoJSON center, then apply offset to align with point cloud
+                          x = (lon - geojsonCenterLon) * 100000 + offsetX;
+                          y = (lat - geojsonCenterLat) * 100000 + offsetY;
+                        }
+
+                        points.push(new THREE.Vector3(x, y, 1));
+
+                        // 新しい座標系での境界を更新
+                        minX = Math.min(minX, x);
+                        maxX = Math.max(maxX, x);
+                        minY = Math.min(minY, y);
+                        maxY = Math.max(maxY, y);
+                      });
+
+                      const geometry = new THREE.BufferGeometry().setFromPoints(
+                        points
+                      );
+                      const material = new THREE.LineBasicMaterial({
+                        color: 0xff0000,
+                        linewidth: 5,
+                        transparent: false,
+                        opacity: 1.0,
+                      });
+                      const line = new THREE.Line(geometry, material);
+
+                      // シーンに追加（Potreeまたは基本THREE.js）
+                      if (isThreeJsFallback && viewer) {
+                        viewer.scene.add(line);
+                      } else if (viewer && viewer.scene && viewer.scene.scene) {
+                        viewer.scene.scene.add(line);
+                        console.log("GeoJSON line added to Potree scene");
+                      }
+                    }
+                  });
+
+                  // GeoJSONの中心を計算してカメラを調整
+                  if (isThreeJsFallback && viewer) {
+                    const centerX = (minX + maxX) / 2;
+                    const centerY = (minY + maxY) / 2;
+                    const width = maxX - minX;
+                    const height = maxY - minY;
+                    const maxDimension = Math.max(width, height);
+
+                    // Don't override camera position if point cloud was already loaded
+                    let shouldUpdateCamera = !viewer.pointCloudCenter;
+
+                    // Use actual point cloud geographic bounds for accurate map tiles
+                    const actualCenterLat = (minLat + maxLat) / 2;
+                    const actualCenterLon = (minLon + maxLon) / 2;
+                    const actualLatRange = maxLat - minLat;
+                    const actualLonRange = maxLon - minLon;
 
                     const zoom =
                       Math.floor(
